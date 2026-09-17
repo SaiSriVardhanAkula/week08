@@ -1,12 +1,17 @@
 name: 01 - CI
 
 on:
-  # Trigger the workflow on push to main branch
+  # Run CI tests when a pull request targets main
+  pull_request:
+    branches:
+      - main
+
+  # Run the full CI pipeline when code is pushed/merged to main
   push:
     branches:
       - main
-  
-  # Manual trigger for the workflow
+
+  # Allow manual execution
   workflow_dispatch:
 
 
@@ -109,11 +114,13 @@ jobs:
     name: Build and Push ${{ matrix.image }}
     runs-on: ubuntu-latest
 
-    # All backend tests must pass before this job starts
+    # All backend tests must pass before images are built
     needs:
       - backend-test
 
-    # Build and push when code is pushed to main or manually triggered
+    # Do not build/push images for pull requests.
+    # Images are built after the PR is merged/pushed to main,
+    # or when the workflow is manually triggered.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     strategy:

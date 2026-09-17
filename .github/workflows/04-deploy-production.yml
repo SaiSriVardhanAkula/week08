@@ -14,7 +14,7 @@ jobs:
     name: Deploy to Production
     runs-on: ubuntu-latest
 
-    # Production runs only when the staging test succeeds
+    # Production runs only when the staging smoke test succeeds
     if: >
       ${{ github.event.workflow_run.conclusion == 'success' }}
 
@@ -27,18 +27,26 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Login to Azure
-        uses: azure/login@v3
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Get AKS credentials
+      # =====================================================
+      # Configure Kubernetes using stored kubeconfig
+      # =====================================================
+      - name: Configure Kubernetes
+        shell: bash
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
         run: |
-          az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
-            --overwrite-existing
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG_DATA" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
+      - name: Verify AKS connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      # =====================================================
+      # Production namespace and secrets
+      # =====================================================
       - name: Create production namespace
         run: |
           kubectl create namespace production \
@@ -68,11 +76,16 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # =====================================================
+      # Apply production manifests
+      # =====================================================
       - name: Apply Kubernetes manifests
         run: |
-          kubectl apply \
-            -f kubernetes/production/
+          kubectl apply -f kubernetes/production/
 
+      # =====================================================
+      # Deploy the tested images
+      # =====================================================
       - name: Update frontend image
         run: |
           kubectl set image deployment/frontend \
@@ -109,6 +122,9 @@ jobs:
             enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ github.event.workflow_run.head_sha }} \
             -n production
 
+      # =====================================================
+      # Verify production rollouts
+      # =====================================================
       - name: Wait for frontend rollout
         run: |
           kubectl rollout status deployment/frontend \
@@ -145,8 +161,23 @@ jobs:
             -n production \
             --timeout=300s
 
+      # =====================================================
+      # Production evidence
+      # =====================================================
       - name: Show production resources
         run: |
+          echo "=== Production Pods ==="
           kubectl get pods -n production
+
+          echo "=== Production Services ==="
           kubectl get services -n production
+
+          echo "=== Production PVCs ==="
           kubectl get pvc -n production
+
+          echo "=== Frontend Production Image ==="
+          kubectl get deployment frontend \
+            -n production \
+            -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+          echo ""

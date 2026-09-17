@@ -14,8 +14,10 @@ jobs:
     name: Deploy to Staging
     runs-on: ubuntu-latest
 
+    # Deploy only when CI completed successfully from a push to main.
     if: >
-      ${{ github.event.workflow_run.conclusion == 'success' }}
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' }}
 
     environment:
       name: staging
@@ -26,18 +28,26 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Login to Azure
-        uses: azure/login@v3
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Get AKS credentials
+      # =====================================================
+      # Configure Kubernetes directly using stored kubeconfig
+      # =====================================================
+      - name: Configure Kubernetes
+        shell: bash
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
         run: |
-          az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
-            --overwrite-existing
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG_DATA" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
+      - name: Verify AKS connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      # =====================================================
+      # Staging namespace and secrets
+      # =====================================================
       - name: Create staging namespace
         run: |
           kubectl create namespace staging \
@@ -67,11 +77,16 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # =====================================================
+      # Deploy manifests
+      # =====================================================
       - name: Apply Kubernetes manifests
         run: |
-          kubectl apply \
-            -f kubernetes/staging/
+          kubectl apply -f kubernetes/staging/
 
+      # =====================================================
+      # Update images using the exact CI commit SHA
+      # =====================================================
       - name: Update frontend image
         run: |
           kubectl set image deployment/frontend \
@@ -108,6 +123,9 @@ jobs:
             enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ github.event.workflow_run.head_sha }} \
             -n staging
 
+      # =====================================================
+      # Verify rollouts
+      # =====================================================
       - name: Wait for frontend rollout
         run: |
           kubectl rollout status deployment/frontend \
@@ -144,6 +162,9 @@ jobs:
             -n staging \
             --timeout=300s
 
+      # =====================================================
+      # Evidence
+      # =====================================================
       - name: Show staging resources
         run: |
           kubectl get pods -n staging
